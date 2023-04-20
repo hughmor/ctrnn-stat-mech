@@ -1,0 +1,13 @@
+# Python stuff
+__pycache__
+
+# VS Code stuff
+.vscode
+
+# Mac OS stuff
+.DS_Store
+
+# Project Specific
+docs/manuscript
+docs/proposal
+
