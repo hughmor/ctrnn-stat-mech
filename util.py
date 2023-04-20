@@ -1,6 +1,7 @@
 import sys
 import numpy as np
-
+import datetime
+import os
 
 def format_bytes(bits):
     # this function should take an integer number of bits and return a string with a human readable string for the size with the best prefix
@@ -23,6 +24,7 @@ def check_disk_space(grid, time):
     type_to_bits = {
         np.dtype('float64'): 64,
         np.dtype('float32'): 32,
+        np.dtype('float16'): 16,
     }
 
     size_bits = num_t * num_grid * type_to_bits[dtype]
@@ -36,8 +38,45 @@ def check_disk_space_prompt_user(grid, time):
     user_response = input(f"the results file will take ~{disk_space} on disk. proceed? [Y/n]")
     valid_responses = {
         "y": lambda: None, # do nothing
-        "n": lambda: sys.exit() # exit the program
+        "n": lambda: sys.exit(), # exit the program
+        "": lambda: None, # do nothing
     }
     while user_response.lower() not in valid_responses:
         user_response = input(f"invalid input. proceed? [Y/n]")
-    valid_responses[user_response]()
+    valid_responses[user_response.lower()]()
+
+def check_filename(output):
+    date = datetime.datetime.now().strftime("%Y-%m-%d")
+    if output is None:
+        if input("no output file specified. are you sure you want to continue wihtout saving? (y/n) ") != "y":
+            sys.exit("no output file specified. exiting...")
+        else:
+            return output
+    elif os.path.isabs(output): # if output is a fully qualified path, use that
+        output = output
+    elif os.path.isdir("data"): # otherwise, only proceed if the data directory exists
+        if not os.path.isdir(os.path.join("data", date)): # make a subdirectory based on the current date
+            os.mkdir(os.path.join("data", date))
+        output = os.path.join("data", date, output)
+        if not output.endswith('.npy'): output += '.npy'
+    else:
+        sys.exit("no data directory found. exiting...")
+    if os.path.isfile(output):
+        resp = input(f"file {output} already exists. overwrite? (Y/n) ")
+        if resp.lower() == "n":
+            sys.exit("exiting...")
+    return output
+
+class Tee(object):
+    def __init__(self, name, mode):
+        self.file = open(name, mode)
+        self.stdout = sys.stdout
+        sys.stdout = self
+    def __del__(self):
+        sys.stdout = self.stdout
+        self.file.close()
+    def write(self, data):
+        self.file.write(data)
+        self.stdout.write(data)
+    def flush(self):
+        self.file.flush()
