@@ -10,4 +10,6 @@ __pycache__
 # Project Specific
 docs/manuscript
 docs/proposal
-
+data
+# old c++ version of the code
+cpp.old

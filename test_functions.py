@@ -1,7 +1,7 @@
 #%%
 import numpy as np
 import matplotlib.pyplot as plt
-from run_gather import create_coupling_matrix
+from simulation import create_coupling_matrix
 
 
 #%%
