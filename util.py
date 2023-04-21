@@ -84,6 +84,13 @@ def parse_metadata(filename):
         metadata = json.load(f)
     return metadata
 
+def get_t_eval_from_filename(filename):
+    metadata = parse_metadata(filename)
+    num_eval = metadata['num_eval']
+    timestep = metadata['timestep']
+    t_span = (0.0, num_eval * timestep)
+    return np.linspace(t_span[0], t_span[1], num_eval + 1)
+
 class Tee(object):
     def __init__(self, name, mode):
         self.file = open(name, mode)

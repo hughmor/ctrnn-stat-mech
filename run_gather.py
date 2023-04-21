@@ -101,6 +101,7 @@ def execute_simulation(
         overwrite_old_file=False,
         seed=None,
         inhibitory=False,
+        print_tqdm=True,
         ):
 
     if log:
@@ -140,7 +141,7 @@ def execute_simulation(
     
     # set up time parameters
     t_span = (0.0, num_eval * timestep)
-    t_eval = np.linspace(t_span[0], t_span[1], num_eval, endpoint=False)
+    t_eval = np.linspace(t_span[0], t_span[1], num_eval + 1)
 
     # set up coupling matrix
     coupling = simulation.create_coupling_matrix(coupling_radius, dtype, norm=coupling_sum, inhibitory=inhibitory)
@@ -160,7 +161,13 @@ def execute_simulation(
     
     print_out(f"running {sim_type} simulation using {num_proc_str}...")
     results.append(deepcopy(grid))
-    for t in tqdm(t_eval, desc=f"{os.getpid()}"): # use tqdm to show progress bar
+
+    if print_tqdm:
+        time_iter = tqdm(t_eval[:-1], desc=f"{os.getpid()}")
+    else:
+        time_iter = t_eval[:-1]
+
+    for t in time_iter: # use tqdm to show progress bar
         if parallel:
             res = simulation.parallel_simulation(grid, params, (t, t+timestep), num_chunks=num_procs)
         else:
@@ -183,7 +190,7 @@ def execute_simulation(
             json.dump(metadata, f_metadata, default=repr)
         print_out("done!")
     else:
-        return results
+        return results, t_eval
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run CTRNN simulation.")
