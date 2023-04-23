@@ -1,8 +1,9 @@
+#%%
 import numpy as np
 
 # Based on http://math.stackexchange.com/questions/1287634/implementing-ornstein-uhlenbeck-in-matlab
 class OrnsteinUhlenbeckActionNoise:
-    def __init__(self, mu=0, sigma=0.2, theta=.15, dt=1e-2, x0=None):
+    def __init__(self, mu=0, sigma=0.2, theta=1.0, dt=1e-2, x0=None):
         self.theta = theta
         self.mu = np.array([mu])
         self.sigma = sigma
@@ -20,3 +21,18 @@ class OrnsteinUhlenbeckActionNoise:
 
     def __repr__(self):
         return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(self.mu, self.sigma)
+
+
+if __name__ == '__main__':
+    # test the noise for varying values of theta
+    import matplotlib.pyplot as plt
+
+    theta_values = [0.0, 0.15, 1.0, 5.0, 10.0]
+    for theta in theta_values:
+        ou = OrnsteinUhlenbeckActionNoise(mu=0.0, sigma=1.0, theta=theta)
+        ou.reset()
+        x = [ou() for _ in range(1000)]
+        plt.plot(x, label=f"theta={theta}")
+    plt.legend()
+    plt.show()
+# %%

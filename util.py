@@ -57,6 +57,9 @@ def check_filename(output, overwrite=False):
     elif os.path.isdir("data"): # otherwise, only proceed if the data directory exists
         if not os.path.isdir(os.path.join("data", date)): # make a subdirectory based on the current date
             os.mkdir(os.path.join("data", date))
+        if os.path.dirname(output) != "": # check if the output file specifies a subdirectory and make it if it doesn't exist
+            if not os.path.isdir(os.path.join("data", date, os.path.dirname(output))):
+                os.mkdir(os.path.join("data", date, os.path.dirname(output)))
         output = os.path.join("data", date, output)
         if not output.endswith('.npy'): output += '.npy'
         # also make a subdirectory for the current date in the media folder

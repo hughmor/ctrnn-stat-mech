@@ -15,27 +15,10 @@ import datetime
 import logging
 import util
 import simulation
+import noise as noise_module
 
-def run_temperature_sweep():
-    params = dict(
-        num_points=500,
-        num_eval=100,
-        timestep=1.0,
-        parallel=False,
-        num_procs=None,
-        skip_prompt=True,
-        dtype='float32',
-        coupling_radius=3,
-        coupling_sum = None, # coupling_sum=1.0,
-        init=None,
-        verbose=True,
-        log=True,
-    )
-
-    num_temps = 16
-    temperature_sweep = np.logspace(-1, 1, num_temps)
-    filenames = [f'temperature_sweep_{i}'for i in range(len(temperature_sweep))]
-
+def run_temperature_sweep(temperatures, params, filenames):
+    num_temps = len(temperatures)
     print(f'running {num_temps} simulations, the following is for *each* simulation:')
     util.check_disk_space_prompt_user(params)
     print(f'running...')
@@ -49,7 +32,7 @@ def run_temperature_sweep():
         #f = execute_with_params # dill.loads(dill.dumps(execute_with_params))
 
         total_items = num_temps  * params['num_eval']
-        params_iter = (dict(temperature=temperature, output=filename, **params) for i, (temperature, filename) in enumerate(zip(temperature_sweep, filenames)))
+        params_iter = (dict(temperature=temperature, output=filename, **params) for i, (temperature, filename) in enumerate(zip(temperatures, filenames)))
         #futures = [executor.submit(execute_simulation, **p) for p in params_iter]
         process_map(execute_simulation_with_params, params_iter)
 
@@ -95,6 +78,7 @@ def execute_simulation(
         dtype='float32',
         coupling_radius=3,
         coupling_sum=1.0,
+        coupling_matrix=None,
         init=None,
         verbose=True,
         log=False,
@@ -102,6 +86,7 @@ def execute_simulation(
         seed=None,
         inhibitory=False,
         print_tqdm=True,
+        input_signals=None,
         ):
 
     if log:
@@ -144,13 +129,23 @@ def execute_simulation(
     t_eval = np.linspace(t_span[0], t_span[1], num_eval + 1)
 
     # set up coupling matrix
-    coupling = simulation.create_coupling_matrix(coupling_radius, dtype, norm=coupling_sum, inhibitory=inhibitory)
-    # gaussian rather than NN because I want to investigate the effect of coupling strength and radius
+    if coupling_matrix is None:
+        coupling = simulation.create_coupling_matrix(coupling_radius, dtype, norm=coupling_sum, inhibitory=inhibitory)
+        # gaussian rather than NN because I want to investigate the effect of coupling strength and radius
+    else:
+        coupling = coupling_matrix
 
     # run simulation over a number of timesteps
-    params = (coupling, temperature, biases)
+    #noise = (np.random.normal(0, temperature, biases.shape) for _ in range(num_eval)) # does noise need to have its variance scaled by sqrt(timestep)?
+    noise_obj = noise_module.OrnsteinUhlenbeckActionNoise(mu=np.zeros_like(biases), sigma=temperature, dt=timestep)
+    noise = (noise_obj() for _ in range(num_eval))
+
     results = []
     
+    # set up external input
+    ext_in = np.zeros_like(biases)
+    if input_signals is None: input_signals = {}
+
     # start timer
     start = time.time()
     start_str = datetime.datetime.fromtimestamp(start).strftime('%Y-%m-%d_%H-%M-%S')
@@ -168,6 +163,11 @@ def execute_simulation(
         time_iter = t_eval[:-1]
 
     for t in time_iter: # use tqdm to show progress bar
+        for coord, signal in input_signals.items():
+            x, y = coord
+            ext_in[x, y] = signal(t)
+
+        params = (coupling, next(noise), ext_in, biases)
         if parallel:
             res = simulation.parallel_simulation(grid, params, (t, t+timestep), num_chunks=num_procs)
         else:
@@ -186,6 +186,10 @@ def execute_simulation(
     if output is not None:
         print_out(f"saving results to {output} ...")
         np.save(output, results)
+
+        # removing input signals to be json serializable
+        del metadata["input_signals"]
+
         with open(f"{output}.metadata", "w") as f_metadata:
             json.dump(metadata, f_metadata, default=repr)
         print_out("done!")

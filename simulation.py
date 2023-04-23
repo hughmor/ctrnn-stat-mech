@@ -133,12 +133,18 @@ def parallel_simulation(initial_conditions, params, t_span, num_chunks):
     padding = kernel_size // 2
     grid_chunks = divide_grid(initial_conditions, num_chunks, padding=padding) # this one needs to know the kernel size so it can be padded
     
-    biases = params[2]
+    noise = params[1]
+    noise_chunks = divide_grid(noise, num_chunks) # this one doesn't need to know the kernel size
+
+    ext_in = params[2]
+    in_chunks = divide_grid(ext_in, num_chunks) # this one doesn't need to know the kernel size
+
+    biases = params[3]
     bias_chunks = divide_grid(biases, num_chunks) # this one doesn't need to know the kernel size
 
     # Create a list of parameters for each process
     # add the bias chunk to the params
-    proc_params = ((params[0], params[1], bias_chunk,) for bias_chunk in bias_chunks)
+    proc_params = ((params[0], noise_chunk, in_chunk, bias_chunk,) for noise_chunk, in_chunk, bias_chunk in zip(noise_chunks, in_chunks, bias_chunks))
     timespans = (t_span for _ in range(num_chunks))
     parallel_arg = (True for _ in range(num_chunks))
 
@@ -154,13 +160,11 @@ def parallel_simulation(initial_conditions, params, t_span, num_chunks):
 
 def run_simulation(chunk, params, t_span, parallel=True):
     # unpack parameters
-    coupling, temperature, bias = params
-
-    # noise is an array of the same shape as bias, drawn from a normal distribution
-    noise = np.random.normal(0, temperature, bias.shape)
+    coupling, noise, ext_in, bias = params
     
-    # external input to the grid comes from the bias, the noise, and the coupling from adjacent cells
-    inp = bias + noise + do_weighting(np.tanh(chunk), coupling, parallel=parallel)
+    # external input to the grid comes from the bias, the noise, external excitiation and the coupling from adjacent cells
+    inp = bias + ext_in + do_weighting(np.tanh(chunk), coupling, parallel=parallel) # + noise
+    #inp = bias + ext_in + do_weighting(chunk, coupling, parallel=parallel)
 
     if parallel:
         # discard the padding from the chunk
@@ -186,4 +190,7 @@ def run_simulation(chunk, params, t_span, parallel=True):
     # ret_1d[:,-1] is the final condition
     # TODO: right now, not saving the intermediate time steps
     ret = ret_1d[:,-1].reshape(chunk.shape)
+    
+    ret += noise[0, :, :]
+
     return ret
