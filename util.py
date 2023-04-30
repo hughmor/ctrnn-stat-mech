@@ -3,6 +3,32 @@ import numpy as np
 import datetime
 import os
 import json
+import logging
+import time
+from tqdm import tqdm
+
+from context import sim_context
+
+
+def start_timer():
+    start = time.time()
+    start_str = datetime.datetime.fromtimestamp(start).strftime('%Y-%m-%d_%H-%M-%S')
+    sim_context.start_time = start_str
+    return start
+
+def end_timer(start):
+    end = time.time()
+    end_str = datetime.datetime.fromtimestamp(end).strftime('%Y-%m-%d_%H-%M-%S')
+    sim_context.end_time = end_str
+    sim_context.elapsed_time = end - start
+    return end
+
+def get_time_iterable(t):
+    if sim_context.tqdm:
+        time_iterator = tqdm(t[:-1], desc=f"{os.getpid()}")
+    else:
+        time_iterator = t[:-1]
+    return time_iterator
 
 def format_bytes(bits):
     # this function should take an integer number of bits and return a string with a human readable string for the size with the best prefix
@@ -31,10 +57,10 @@ def check_disk_space(num_points, num_eval, dtype):
 
     return size_bytes_fmtd
 
-def check_disk_space_prompt_user(metadata):
-    num_points = metadata['num_points']
-    num_eval = metadata['num_eval']
-    dtype = metadata['dtype']
+def check_disk_space_prompt_user():
+    num_points = sim_context['num_points']
+    num_eval = sim_context['num_eval']
+    dtype = sim_context['dtype']
 
     disk_space = check_disk_space(num_points, num_eval, dtype)
 
@@ -48,8 +74,9 @@ def check_disk_space_prompt_user(metadata):
         user_response = input(f"invalid input. proceed? [Y/n]")
     valid_responses[user_response.lower()]()
 
-def check_filename(output, overwrite=False):
-    date = datetime.datetime.now().strftime("%Y-%m-%d")
+def check_filename(output):
+    overwrite = sim_context.overwrite_file
+    date = sim_context.date
     if output is None:
         return output
     elif os.path.isabs(output): # if output is a fully qualified path, use that
@@ -61,10 +88,7 @@ def check_filename(output, overwrite=False):
             if not os.path.isdir(os.path.join("data", date, os.path.dirname(output))):
                 os.mkdir(os.path.join("data", date, os.path.dirname(output)))
         output = os.path.join("data", date, output)
-        if not output.endswith('.npy'): output += '.npy'
-        # also make a subdirectory for the current date in the media folder
-        if not os.path.isdir(os.path.join("media", date)):
-            os.mkdir(os.path.join("media", date))
+        #if not output.endswith('.npy'): output += '.npy'
     else:
         sys.exit("no data directory found. exiting...")
     if os.path.isfile(output) and not overwrite:
@@ -87,14 +111,29 @@ def parse_metadata(filename):
         metadata = json.load(f)
     return metadata
 
-def get_t_eval_from_filename(filename):
-    metadata = parse_metadata(filename)
-    num_eval = metadata['num_eval']
-    timestep = metadata['timestep']
-    t_span = (0.0, num_eval * timestep)
-    return np.linspace(t_span[0], t_span[1], num_eval + 1)
+def get_num_procs():
+    parallel = sim_context.parallel
+    num_procs = sim_context.num_procs
+    if parallel:
+        if num_procs is None:
+            num_procs = os.cpu_count()
+    else:
+        num_procs = 1
+    return num_procs
+
+def write():
+    log = sim_context.log
+    verbose = sim_context.verbose
+    if log:
+        print_out = logging.info
+    elif verbose:
+        print_out = print
+    else:
+        print_out = lambda x: None
+    return print_out
 
 class Tee(object):
+    # TODO: I liked how this class works but doesn't play nice with input()
     def __init__(self, name, mode):
         self.file = open(name, mode)
         self.stdout = sys.stdout
@@ -107,3 +146,21 @@ class Tee(object):
         self.stdout.write(data)
     def flush(self):
         self.file.flush()
+
+
+def nonlinear_spacing(v1, v2, N, steepness=1, type='sigmoid'):
+    if type == 'sin':
+        linear_points = np.linspace(0, 1, N) # linear spacing between 0 and 1
+        nonlinear_points = np.arcsin(2*linear_points - 1) / np.pi + 0.5 # nonlinear spacing between 0 and 1
+        return v1 + (v2 - v1) * nonlinear_points # scale to v1 and v2
+    elif type == 'sigmoid':
+        midpoint = (v1 + v2)/2
+        min_x = 1/(np.exp((midpoint-v1)*steepness) + 1)
+        max_x = 1/(np.exp((midpoint-v2)*steepness) + 1)
+        linear_points = np.linspace(min_x, max_x, N) # linear spacing between 0 and 1
+
+        nonlinear_points = -np.log(1/linear_points - 1)/steepness + midpoint # nonlinear spacing between 0 and 1
+        # clip to v1 and v2 - should be unnecessary, but maybe rounding causes some issues
+        nonlinear_points[nonlinear_points < v1] = v1
+        nonlinear_points[nonlinear_points > v2] = v2
+        return nonlinear_points

@@ -1,5 +1,6 @@
 import numpy as np
 import matplotlib.pyplot as plt
+import matplotlib as mpl
 from matplotlib import animation
 from IPython.display import HTML
 
@@ -15,6 +16,117 @@ cmaps = [
     'afmhot',
     'cool',
 ]
+
+def plot_E_M_t(states):
+    fig, (m_ax, e_ax) = plt.subplots(2, 1, sharex=True)
+    temps = list(states.keys())
+    maxtemp = max(temps)
+    mintemp = min(temps)
+    for temp, (t,e,m) in states.items():
+        # color the lines by temperature
+        cmap = plt.get_cmap('viridis')
+        temp_norm = (temp - mintemp) / (maxtemp - mintemp)
+
+        m_ax.plot(t, m, label=f'T={temp:.1f}', color=cmap(temp_norm))
+        e_ax.plot(t, e, color=cmap(temp_norm)) # , label=f'T={temp:.1f}' removed because it's too many labels
+
+    # make space for cbar to the right
+    fig.subplots_adjust(right=0.95)
+    # add colorbar for temperature
+    cbar_ax = fig.add_axes([0.96, 0.15, 0.02, 0.7])
+    norm = plt.Normalize(mintemp, maxtemp)
+    cb1 = mpl.colorbar.ColorbarBase(cbar_ax, cmap=cmap,
+                                    norm=norm,
+                                    orientation='vertical')
+    cb1.set_label('Temperature ($T$)')
+
+
+    m_ax.set_ylabel('Activity ($A(t)$)')
+    e_ax.set_ylabel('Energy ($E(t)$)')
+    e_ax.set_xlabel('Time ($t$)')
+    plt.show()
+
+def plot_M_t(states):
+    plt.figure()
+    temps = list(states.keys())
+    maxtemp = max(temps)
+    mintemp = min(temps)
+    # add line through y=0
+    plt.axhline(0, color='black', linestyle='-', lw=1)
+
+    for sim_result in states:
+        temp = sim_result.metadata['temperature']
+        m = sim_result.state['activity']
+        t = sim_result.state['time']
+        plt.plot(t, m, label=f'T={temp:.1f}')
+
+    plt.xlabel('Time ($t$)')
+    plt.ylabel('Activity ($A(t)$)')
+    plt.legend()
+
+def plot_s_t(x,y,sim_state,fig=None):
+    # if x and y are ints, plot the state at that point over time
+    # if x and y are lists, plot the state at those points over time
+    
+    if fig is None:
+        fig = plt.figure()
+    if isinstance(x, int) and isinstance(y, int):
+        x = [x]
+        y = [y]
+    elif isinstance(x, list) and isinstance(y, list):
+        pass
+    else:
+        raise ValueError('x and y must both be ints or lists')
+    
+    grid = np.array(sim_state.state['grid'])
+    for x_, y_ in zip(x,y):
+        plt.plot(sim_state.state['time'], grid[:,x_,y_], label=f'({x_},{y_})')
+    
+    if fig is None: 
+        plt.xlabel('Time ($t$)')
+        plt.ylabel('State ($s(t)$)')
+        plt.legend()
+
+def plot_sampled_s_t(states, N=5):
+    sim_result = states[-1]
+    grid = np.array(sim_result.state['grid'])
+
+    plt.figure()
+    # pick a few random points and plot over time
+    for _ in range(N):
+        x = np.random.randint(0, grid.shape[1])
+        y = np.random.randint(0, grid.shape[2])
+        plot_s_t(x,y,sim_result,fig=plt.gcf())
+    
+    plt.xlabel('Time ($t$)')
+    plt.ylabel('State ($s(t)$)')
+    plt.legend()
+
+
+def plot_E_t(states):
+    plt.figure()
+
+    for sim_result in states:
+        temp = sim_result.metadata['temperature']
+        e = sim_result.state['energy']
+        t = sim_result.state['time']
+        plt.plot(t, e, label=f'T={temp:.1f}')
+    plt.xlabel('Time')
+    plt.ylabel('Energy ($E(t)$)')
+    plt.legend()
+
+
+def plot_grid_T(tiles, time_idx=-1):
+    n = len(tiles)
+    N = round(np.sqrt(n))
+    fig, ax = plt.subplots(N, N+1, figsize=(10,10))
+    for i, tile in enumerate(tiles):
+        grid = tile.state['grid']
+        temp = tile.metadata['temperature']
+        ax[i//(N+1), i%(N+1)].imshow(grid[time_idx], cmap='plasma', vmin=-1, vmax=1)
+        ax[i//(N+1), i%(N+1)].axis('off')
+        ax[i//(N+1), i%(N+1)].set_title(f'T={temp:.1f}')
+    plt.show()
 
 def plot_grid(sim_results, plot_idx=None, filename=None, time_idx=-1, time=None, title=None):
     # this function sets up the plot which will either be static or passed to an animation function to animate
@@ -112,3 +224,4 @@ def animate_grid(sim_results, time=None, filename=None, title=None, plot_idx=Non
     else: # save the animation as an mp4.  This requires ffmpeg or mencoder to be installed
         if not filename.endswith('.mp4'): filename += '.mp4'
         anim.save(filename, fps=30, extra_args=['-vcodec', 'libx264'])
+        print(f'Animation saved to {filename}')

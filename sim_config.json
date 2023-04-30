@@ -1,0 +1,21 @@
+{
+    "num_points": 100,
+    "num_eval": 100,
+    "timestep": 0.1,
+    "temperature": 1.0,
+    "boundary_conditions": "periodic",
+    "parallel": false,
+    "num_procs": 1,
+    "skip_prompt": false,
+    "dtype": "float32",
+    "coupling_radius": 3,
+    "coupling_sum": 1.0,
+    "verbose": false,
+    "log": false,
+    "overwrite_file": false,
+    "seed": 1234567890,
+    "noise_type": "gaussian",
+    "end_when_steady": false,
+    "bias_distribution": "uniform",
+    "tqdm": true
+}

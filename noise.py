@@ -1,5 +1,6 @@
 #%%
 import numpy as np
+from context import sim_context
 
 # Based on http://math.stackexchange.com/questions/1287634/implementing-ornstein-uhlenbeck-in-matlab
 class OrnsteinUhlenbeckActionNoise:
@@ -23,6 +24,23 @@ class OrnsteinUhlenbeckActionNoise:
         return 'OrnsteinUhlenbeckActionNoise(mu={}, sigma={})'.format(self.mu, self.sigma)
 
 
+def noise_process(temperature, noise_type=None, dtype=None):
+    if dtype is None:
+        dtype = sim_context.dtype
+    dtype = np.dtype(dtype)
+
+    num_eval = sim_context.num_eval
+    timestep = sim_context.timestep
+    shape = (sim_context.num_points, sim_context.num_points)
+    if noise_type is None:
+        noise = (np.random.normal(0, temperature, shape).astype(dtype) for _ in range(num_eval)) # does noise need to have its variance scaled by sqrt(timestep)?
+    elif noise_type == 'gaussian':
+        noise = (np.random.normal(0, 1.0, shape).astype(dtype)*temperature/np.sqrt(timestep) for _ in range(num_eval))
+    elif noise_type == 'ou':
+        noise_obj = OrnsteinUhlenbeckActionNoise(mu=np.zeros(shape, dtype), sigma=temperature, dt=timestep)
+        noise = (noise_obj() for _ in range(num_eval))
+    return noise
+
 if __name__ == '__main__':
     # test the noise for varying values of theta
     import matplotlib.pyplot as plt
@@ -35,4 +53,6 @@ if __name__ == '__main__':
         plt.plot(x, label=f"theta={theta}")
     plt.legend()
     plt.show()
+
+
 # %%

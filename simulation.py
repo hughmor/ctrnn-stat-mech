@@ -2,6 +2,74 @@ import numpy as np
 from scipy.integrate import solve_ivp
 from scipy.signal import convolve2d
 from concurrent.futures import ProcessPoolExecutor
+import pickle
+
+from context import sim_context
+
+def activity(results):
+    # results should be the 2D grid at a single time
+    return np.mean(np.tanh(results))
+
+def energy(states, biases, only_multi=False):
+    # states should be the 2D grid at a single time
+    spins = np.tanh(states)
+   
+    coupling = sim_context['coupling_matrix']
+    mid = sim_context['coupling_radius'] // 2
+    self_weight = coupling[mid, mid]
+
+    #energy = spins * (states - biases) + 0.5 * np.log(1 - spins * spins) -apply_weights(spins, coupling, parallel=False) + 0.5 * self_weight * spins * spins
+    alt_energy = states*states/2 - states*biases - states * apply_weights(spins, coupling, parallel=False)
+
+    return np.sum(alt_energy)/(sim_context['num_points']**2) # energy per lattice site
+
+### Simulation state and saving/loading
+class SimulationState():
+    def __init__(self, metadata=None):
+        self.state = {
+            'time': [],
+            'activity': [],
+            'energy': [],
+        }
+        if sim_context['save_grid']:
+            self.state['grid'] = []
+
+        self.metadata = metadata
+
+    def __getitem__(self, key):
+        return self.state[key]
+    
+    def record(self, time, grid, biases):
+        self.state['time'].append(time)
+        if sim_context['save_grid']:
+            self.state['grid'].append(grid)
+        self.state['activity'].append(activity(grid))
+        self.state['energy'].append(energy(grid, biases))
+
+    def add_metadata(self, metadata):
+        self.metadata = metadata
+
+    def save(self, filename):
+        if not filename.endswith('.pkl'):
+            filename += '.pkl'
+        with open(filename, 'wb') as f:
+            pickle.dump(self, f)
+
+    @classmethod
+    def load(cls, filename):
+        if not filename.endswith('.pkl'):
+            filename += '.pkl'
+        with open(filename, 'rb') as f:
+            return pickle.load(f)
+
+def save_results(filename, simulation_state):
+    simulation_state.save(filename)
+
+def load_results(filename):
+    simulation_state = SimulationState.load(filename)
+    return simulation_state
+
+### Parallel simulation
 
 def chunk(N):
     x, y = 1, N
@@ -74,60 +142,6 @@ def recombine_chunks(chunks, shape, num_chunks):
             grid[x_start:x_end, y_start:y_end] = chunks[i * cx + j]
     return grid
 
-def create_coupling_matrix(N, dtype, norm=1.0, inhibitory=False):
-    # create an NxN matrix with gaussian distribution from the center
-    matrix = np.zeros((N,N), dtype=dtype)
-    for i in range(N):
-        for j in range(N):
-            matrix[i,j] = np.exp(-((i-N//2)**2 + (j-N//2)**2)/2)
-    if inhibitory:
-        matrix[N // 2, N // 2] *= -1
-    # normalize the matrix to sum to norm
-    if norm is not None: # pass None to leave matrix unnormalized
-        matrix = matrix / np.sum(matrix) * norm 
-    return matrix
-
-def create_grid(biases):
-    # initial grid is just a copy of the biases
-    return biases.copy()
-
-def init_biases(nx, ny, dtype, distribution=None):
-    # get numpy dtype object from string
-    dtype = np.dtype(dtype)
-
-    # Define the grid based on a chosen distribution
-    # Default to uniform distribution on [-1, 1]
-    initial_conditions = np.zeros((nx, ny), dtype=dtype)
-    if distribution is None or distribution == 'uniform':
-        initial_conditions[:] = 2*np.random.rand(nx, ny) - 1
-    elif distribution == 'gaussian' or distribution == 'normal':
-        initial_conditions[:] = np.random.normal(0, 1, (nx, ny))
-    elif distribution == 'zero':
-        pass
-    else:
-        raise ValueError(f"invalid bias distribution: {distribution}")
-    return initial_conditions
-
-def do_weighting(s, coupling, parallel=True):
-    # s is the state of the grid (NxN), coupling is the coupling matrix (MxM) M < N
-    if not parallel:
-        # if serial simulation, then s is the whole grid
-        # wrap boundary takes into account PBCs
-        # TODO: for not PBC
-        return convolve2d(s, coupling, mode='same', boundary='wrap')
-    else:
-        # if parallel simulation, then s is a chunk of the grid padded with adjacent cells
-        # in this case, we want the convolution to return a smaller array and not wrap around
-        return convolve2d(s, coupling, mode='valid', boundary='fill', fillvalue=0)
-
-def ds_dt(t, s, inp):
-    return -s + inp
-
-def serial_simulation(initial_conditions, params, t_span):
-    # Run simulation without parallelization
-    sol = run_simulation(initial_conditions, params, t_span, parallel=False)
-    return sol
-
 def parallel_simulation(initial_conditions, params, t_span, num_chunks):
     kernel_size = params[0].shape[0]
     padding = kernel_size // 2
@@ -150,7 +164,7 @@ def parallel_simulation(initial_conditions, params, t_span, num_chunks):
 
     # Run the simulations in parallel using ProcessPoolExecutor
     with ProcessPoolExecutor() as executor:
-        ret = executor.map(run_simulation, grid_chunks, proc_params, timespans, parallel_arg)
+        ret = executor.map(run_simulation_step, grid_chunks, proc_params, timespans, parallel_arg)
         results = list(ret)
 
     # Recombine the chunks
@@ -158,13 +172,95 @@ def parallel_simulation(initial_conditions, params, t_span, num_chunks):
 
     return grid_state
 
-def run_simulation(chunk, params, t_span, parallel=True):
+### Serial simulation
+
+def serial_simulation(initial_conditions, params, t_span):
+    # Run simulation without parallelization
+    sol = run_simulation_step(initial_conditions, params, t_span, parallel=False)
+    return sol
+
+### Initialization functions
+
+def gaussian_kernel(N, dtype=None, norm=1.0):
+    if dtype is None:
+        dtype = sim_context.dtype
+    dtype = np.dtype(dtype)
+    
+    # create an NxN matrix with gaussian distribution from the center
+    matrix = np.zeros((N,N), dtype=dtype)
+    for i in range(N):
+        for j in range(N):
+            matrix[i,j] = np.exp(-((i-N//2)**2 + (j-N//2)**2)/2)
+    # normalize the matrix to sum to norm
+    if norm is not None: # pass None to leave matrix unnormalized
+        matrix = matrix / np.sum(matrix) * norm 
+    return matrix
+
+def create_grid(biases):
+    # initial grid is just a copy of the biases
+    return biases.copy()
+
+def init_biases(nx, ny, dtype=None, init_bias=None): 
+    if dtype is None:
+        dtype = sim_context.dtype
+    dtype = np.dtype(dtype)
+
+    # Define the grid based on a chosen distribution
+    # Default to uniform distribution on [-1, 1]
+    if init_bias is not None:
+        biases_array = init_bias.astype(dtype)
+        assert biases_array.shape == (nx, ny), f"init_bias shape {biases_array.shape} does not match biases shape {(nx, ny)}"
+    else:
+        distribution = sim_context.bias_distribution
+        biases_array = np.zeros((nx, ny), dtype=dtype)
+        if distribution is None:
+            distribution = sim_context.bias_distribution
+        if distribution == 'uniform':
+            biases_array[:] = 2*np.random.rand(nx, ny) - 1
+        elif distribution == 'gaussian' or distribution == 'normal':
+            biases_array[:] = np.random.normal(0, 1, (nx, ny))
+        elif distribution == 'zero':
+            pass
+        else:
+            raise ValueError(f"invalid bias distribution: {distribution}")
+    return biases_array
+
+### Main stepping functions
+
+def apply_weights(s, coupling, parallel=True):
+    # s is the state of the grid (NxN), coupling is the coupling matrix (MxM) M < N
+    bcs = sim_context.boundary_conditions
+    
+    if bcs == 'periodic':
+        if not parallel:
+            # if serial simulation, then s is the whole grid
+            # wrap boundary takes into account PBCs
+            return convolve2d(s, coupling, mode='same', boundary='wrap')
+        else:
+            # if parallel simulation, then s is a chunk of the grid padded with adjacent cells
+            # in this case, we want the convolution to return a smaller array and not wrap around
+            return convolve2d(s, coupling, mode='valid', boundary='fill', fillvalue=0)
+    elif bcs == 'free':
+        if not parallel:
+            # don't use boundary='wrap' because it will wrap around the edges
+            return convolve2d(s, coupling, mode='same', boundary='fill', fillvalue=0)
+        else:
+            # if parallel simulation, then s is a chunk of the grid padded with adjacent cells
+            # in this case, we want the convolution to return a smaller array and not wrap around
+            raise NotImplementedError("TODO: free boundary conditions should be fixed in chunking function")
+            return convolve2d(s, coupling, mode='valid', boundary='fill', fillvalue=0)
+    else:
+        raise ValueError(f"invalid boundary condition: {bcs}")
+
+def ds_dt(t, s, inp):
+    return -s + inp
+
+def run_simulation_step(chunk, params, t_span, parallel=True):
     # unpack parameters
     coupling, noise, ext_in, bias = params
     
     # external input to the grid comes from the bias, the noise, external excitiation and the coupling from adjacent cells
-    inp = bias + ext_in + do_weighting(np.tanh(chunk), coupling, parallel=parallel) # + noise
-    #inp = bias + ext_in + do_weighting(chunk, coupling, parallel=parallel)
+    inp = bias + noise + ext_in + apply_weights(np.tanh(chunk), coupling, parallel=parallel)
 
     if parallel:
         # discard the padding from the chunk
@@ -180,17 +276,10 @@ def run_simulation(chunk, params, t_span, parallel=True):
     sol = solve_ivp(ds_dt, t_span, oned_chunk, args=(oned_inp,), method='RK45')
     ret_1d = sol.y
 
-    # check how many time steps were taken # TODO remove this
-    num_time_steps = ret_1d.shape[1]
-    if num_time_steps > 5:
-        print(f"WARNING: took {num_time_steps} time steps at time {t_span[0]}")
-
     # Reshape the solution to the original shape of the chunk
     # ret_1d[:,0] is the initial condition
     # ret_1d[:,-1] is the final condition
-    # TODO: right now, not saving the intermediate time steps
     ret = ret_1d[:,-1].reshape(chunk.shape)
     
-    ret += noise[0, :, :]
-
     return ret
+

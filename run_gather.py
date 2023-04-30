@@ -13,188 +13,167 @@ import json
 import time
 import datetime
 import logging
+import itertools
+
 import util
 import simulation
-import noise as noise_module
+import noise
+import analysis
+DEFAULT_CONFIG = 'sim_config.json'
+from context import sim_context
 
-def run_temperature_sweep(temperatures, params, filenames):
+def run_generalized_sweep(sweep_params, params, config_json, base_filename=None):
+    sim_context.load_config(config_json)
+    sim_context.update_config(params)
+
+    # sweep params is a dictionary of lists, where each list is a sweep over a parameter
+    # e.g. sweep_params = {'noise': [0.1, 0.2, 0.3], 'bias': [0.1, 0.2, 0.3]}
+    # create a list of dictionaries, where each dictionary is a set of parameters for a simulation
+    
+    for param_name, param_values in sweep_params.items():
+        if not isinstance(param_values, list):
+            sweep_params[param_name] = [param_values]
+    if base_filename is None:
+        base_filename = 'master/' + '_'.join(sweep_params.keys())
+    sweep_params = [dict(zip(sweep_params, v)) for v in itertools.product(*sweep_params.values())]
+    filenames = [f'{base_filename}_{i}' for i in range(len(sweep_params))]   
+
+    # Run the simulations in parallel using ProcessPoolExecutor
+    with ProcessPoolExecutor() as executor:
+        params_iter = (dict(output_file=filename, **sweep_param, **params) for i, (sweep_param, filename) in enumerate(zip(sweep_params, filenames)))
+        #futures = [executor.submit(execute_simulation, **p) for p in params_iter]
+        process_map(execute_simulation_with_params, params_iter)
+
+def run_temperature_sweep(temperatures, params, filenames, config_json):
+    sim_context.load_config(config_json)
+    sim_context.update_config(params)
+
     num_temps = len(temperatures)
     print(f'running {num_temps} simulations, the following is for *each* simulation:')
-    util.check_disk_space_prompt_user(params)
+    util.check_disk_space_prompt_user()
     print(f'running...')
-
 
     # set up logging to print debug messages to the console
     #logging.basicConfig(level=logging.DEBUG)
 
     # Run the simulations in parallel using ProcessPoolExecutor
     with ProcessPoolExecutor() as executor:
-        #f = execute_with_params # dill.loads(dill.dumps(execute_with_params))
-
-        total_items = num_temps  * params['num_eval']
-        params_iter = (dict(temperature=temperature, output=filename, **params) for i, (temperature, filename) in enumerate(zip(temperatures, filenames)))
+        params_iter = (dict(output_file=filename, temperature=temperature, **params) for i, (temperature, filename) in enumerate(zip(temperatures, filenames)))
         #futures = [executor.submit(execute_simulation, **p) for p in params_iter]
         process_map(execute_simulation_with_params, params_iter)
-
-
-        # wait for all the simulations to finish
-        # print(f'waiting for simulations to finish...')
-        # for future in concurrent.futures.as_completed(futures):
-        #     try:
-        #         result = future.result()
-        #         print(f'result: {result}')
-        #     except Exception as e:
-        #         print(f'error getting pids and ports: {str(e)}')
-        #         logging.error(f"Error processing item: {e}")
-        #         import traceback
-        #         traceback.print_exc()
-
-        # print('getting pids and ports')
-        # try:
-        #     pids_ports = [(f._process.pid, f._process._popen.args[-1].split(':')[-1]) for f in futures]
-        #     print('received pids and ports')
-        # except Exception as e:
-        #     print(f'error getting pids and ports: {str(e)}')
-    
-
-
-    # for filename, temperature in zip(filenames, temperature_sweep):
-    #     params['temperature'] = temperature
-    #     params['output'] = None
-    #     execute_simulation(**params)
 
 def execute_simulation_with_params(params):
     return execute_simulation(**params)
 
-def execute_simulation(
-        output=None,
-        num_points=100,
-        num_eval=100,
-        timestep=1.0,
-        temperature=1.0,
-        parallel=False,
-        num_procs=None,
-        skip_prompt=False,
-        dtype='float32',
-        coupling_radius=3,
-        coupling_sum=1.0,
-        coupling_matrix=None,
-        init=None,
-        verbose=True,
-        log=False,
-        overwrite_old_file=False,
-        seed=None,
-        inhibitory=False,
-        print_tqdm=True,
-        input_signals=None,
-        ):
+def execute_simulation(output_file=None,
+                       input_signals=None,
+                       initial_condition=None,
+                       init_bias=None,
+                       coupling_matrix=None,
+                       skip_prompt=False,
+                       config_json=None,
+                       **kwargs):
+    # set up metadata context
+    if config_json is not None: # filename was passed in, assume this is what we want to load
+        sim_context.load_config(config_json)
+    else: # no config was passed in
+        if sim_context._config is None: # first check if the global context has been loaded already
+            sim_context.load_config(DEFAULT_CONFIG)
+    sim_context.update_config(kwargs) # update the context with any additional kwargs
 
-    if log:
-        print_out = logging.info
-    elif verbose:
-        print_out = print
-    else:
-        print_out = lambda x: None
+    # set up logging to print debug messages to the console
+    print = util.write()
     
     # check if output filename is valid
-    output = util.check_filename(output, overwrite=overwrite_old_file)
-    # Tee(output+'.log', 'w') # good for logging but messes with displaying input()
+    output_file = util.check_filename(output_file)
 
-    if parallel:
-        if num_procs is None:
-            num_procs = os.cpu_count()
+    # set up parallel processing
+    num_procs = util.get_num_procs()
+    if sim_context.parallel:
+        simulation_step = lambda ic, pars, t: simulation.parallel_simulation(ic, pars, t, num_procs=num_procs)
     else:
-        num_procs = 1
-
-    # save metadata
-    metadata = locals()
+        simulation_step = simulation.serial_simulation
     
     # prompt user to proceed with simulation
-    if not skip_prompt: util.check_disk_space_prompt_user(metadata)
+    if not skip_prompt: util.check_disk_space_prompt_user()
 
-    print_out("setting up grid and simulation...")
-    # set numpy random seed
-    if seed is not None:
-        np.random.seed(seed)
-        # this is apparently best practice for numpy random seed
-        # from numpy.random import MT19937, RandomState, SeedSequence
-        # rs = RandomState(MT19937(SeedSequence(123456789)))
+    # main simulation set up
+    print("setting up grid and simulation...")
+    if sim_context.seed is not None:
+        np.random.seed(sim_context.seed)
 
-    N = M = num_points
-    biases = simulation.init_biases(N, M, dtype, distribution=init) # set up biases according to some random distribution
-    grid = simulation.create_grid(biases) # initialize grid to biases
-    
-    # set up time parameters
+    # set up simulation parameters
+    num_points = sim_context.num_points
+    num_eval = sim_context.num_eval
+    timestep = sim_context.timestep
+    temperature = sim_context.temperature
+    coupling_radius = sim_context.coupling_radius
+    coupling_sum = sim_context.coupling_sum
+
+    biases = simulation.init_biases(num_points, num_points, init_bias=init_bias) # set up biases according to some random distribution
+
+    if initial_condition is None or initial_condition == 'biases':
+        grid = simulation.create_grid(biases) # initialize grid to biases as initial condition
+    else:
+        if initial_condition == 'random':
+            grid = 2*np.random.rand(num_points, num_points).astype(sim_context.dtype) - 1
+        elif isinstance(initial_condition, np.ndarray):
+            grid = initial_condition
+        assert grid.shape == biases.shape, f"initial condition shape {grid.shape} does not match biases shape {biases.shape}"
+
+    if coupling_matrix is None:
+        coupling_matrix = simulation.gaussian_kernel(coupling_radius, norm=coupling_sum) # set up coupling matrix
+    else:
+        sim_context['coupling_sum'] = coupling_matrix.sum()
+        sim_context['coupling_radius'] = coupling_matrix.shape[0] // 2
+    sim_context['coupling_matrix'] = coupling_matrix
+        
     t_span = (0.0, num_eval * timestep)
     t_eval = np.linspace(t_span[0], t_span[1], num_eval + 1)
-
-    # set up coupling matrix
-    if coupling_matrix is None:
-        coupling = simulation.create_coupling_matrix(coupling_radius, dtype, norm=coupling_sum, inhibitory=inhibitory)
-        # gaussian rather than NN because I want to investigate the effect of coupling strength and radius
-    else:
-        coupling = coupling_matrix
-
-    # run simulation over a number of timesteps
-    #noise = (np.random.normal(0, temperature, biases.shape) for _ in range(num_eval)) # does noise need to have its variance scaled by sqrt(timestep)?
-    noise_obj = noise_module.OrnsteinUhlenbeckActionNoise(mu=np.zeros_like(biases), sigma=temperature, dt=timestep)
-    noise = (noise_obj() for _ in range(num_eval))
-
-    results = []
     
+    noise_proc = noise.noise_process(temperature)
+    simulation_state = simulation.SimulationState()
+
     # set up external input
-    ext_in = np.zeros_like(biases)
+    external_in = np.zeros_like(biases)
     if input_signals is None: input_signals = {}
 
-    # start timer
-    start = time.time()
-    start_str = datetime.datetime.fromtimestamp(start).strftime('%Y-%m-%d_%H-%M-%S')
-    metadata['start_time'] = start_str
-    
     num_proc_str = f"{num_procs} processes" if num_procs != 1 else "1 process"
-    sim_type = "parallel" if parallel else "serial"
-    
-    print_out(f"running {sim_type} simulation using {num_proc_str}...")
-    results.append(deepcopy(grid))
+    sim_type = "parallel" if sim_context.parallel else "serial"
+    print(f"running {sim_type} simulation using {num_proc_str}...")
 
-    if print_tqdm:
-        time_iter = tqdm(t_eval[:-1], desc=f"{os.getpid()}")
-    else:
-        time_iter = t_eval[:-1]
+    # start timer
+    start = util.start_timer()
+    # run simulation step by step
+    time_range = util.get_time_iterable(t_eval)
+    for t in time_range:
+        for (x, y), signal in input_signals.items():
+            external_in[x, y] = signal(t)
 
-    for t in time_iter: # use tqdm to show progress bar
-        for coord, signal in input_signals.items():
-            x, y = coord
-            ext_in[x, y] = signal(t)
+        simulation_state.record(t, deepcopy(grid), biases)
+        params = (coupling_matrix, next(noise_proc), external_in, biases)
+        grid = simulation_step(grid, params, (t, t+timestep))        
+        
+        if sim_context.end_when_steady and t > t_span[1]/4: # at least 25% of the way through simulation
+            if analysis.simulation_steady(simulation_state):
+                break
+            
+    simulation_state.record(t+timestep, deepcopy(grid), biases) # add final state
 
-        params = (coupling, next(noise), ext_in, biases)
-        if parallel:
-            res = simulation.parallel_simulation(grid, params, (t, t+timestep), num_chunks=num_procs)
-        else:
-            res = simulation.serial_simulation(grid, params, (t, t+timestep))
-
-        results.append(deepcopy(res))
-        grid = res
-    
     # end timer
-    end = time.time()
-    end_str = datetime.datetime.fromtimestamp(end).strftime('%Y-%m-%d_%H-%M-%S')
-    metadata['end_time'] = end_str
+    end = util.end_timer(start)
 
-    print_out(f"finished! total time: {end - start:.2f} seconds")
-    # save the results
-    if output is not None:
-        print_out(f"saving results to {output} ...")
-        np.save(output, results)
-
-        # removing input signals to be json serializable
-        del metadata["input_signals"]
-
-        with open(f"{output}.metadata", "w") as f_metadata:
-            json.dump(metadata, f_metadata, default=repr)
-        print_out("done!")
+    # finish up
+    print(f"finished! total time: {end - start:.2f} seconds")
+    
+    simulation_state.add_metadata(sim_context._config)
+    if output_file is not None:
+        print(f"saving results to {output_file} ...")
+        simulation.save_results(output_file, simulation_state)
+        print("done!")
     else:
-        return results, t_eval
+        return simulation_state
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser(description="Run CTRNN simulation.")
@@ -227,7 +206,7 @@ if __name__ == "__main__":
         help="Temperature of the simulation (standard deviation of the noise process)"
     )
     parser.add_argument(
-        "-o", "--output",
+        "-o", "--output-file",
         default=None,
         metavar="filename",
         required=True,
@@ -272,7 +251,7 @@ if __name__ == "__main__":
         help="Sum of the coupling matrix values",
     )
     parser.add_argument(
-        "--init",
+        "--bias_distribution",
         metavar="str",
         type=str,
         default="uniform",
